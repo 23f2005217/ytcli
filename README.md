@@ -37,7 +37,7 @@ go build -o ytcli ./cmd/ytcli
 ### Launch TUI
 
 ```bash
-ytcli                    # Launch with default search
+ytcli                    # Show CLI help
 ytcli "search query"     # Launch with specific search
 ```
 
@@ -46,13 +46,19 @@ ytcli "search query"     # Launch with specific search
 ```bash
 ytcli search "query"          # Search and output JSON results
 ytcli play <url>              # Play a specific URL
+ytcli play --audio-only <url> # Play a specific URL in mpv audio-only mode
 ytcli playlist add <url>      # Add to playlist
+ytcli playlist create music   # Create a named playlist
+ytcli playlist add music <url> "Song title"
 ytcli playlist list           # List playlist
-ytcli playlist remove <url>   # Remove from playlist
+ytcli playlist list music     # List a named playlist
+ytcli playlist remove 0       # Remove from playlist by index
 ytcli history list            # View watch history
 ytcli history clear           # Clear history
 ytcli queue add <url>         # Add to queue
 ytcli queue list              # List queue
+ytcli queue remove 0          # Remove queue item by index
+ytcli queue pop               # Remove and return the next queue item
 ytcli next                    # Next track
 ytcli prev                    # Previous track
 ytcli pause                   # Pause playback

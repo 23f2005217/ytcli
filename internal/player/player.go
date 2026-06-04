@@ -18,6 +18,7 @@ type Player struct {
 	cmd        *exec.Cmd
 	mu         sync.Mutex
 	EventCh    chan Event
+	audioOnly  bool
 }
 
 type Event struct {
@@ -25,10 +26,19 @@ type Event struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+type Options struct {
+	AudioOnly bool
+}
+
 func New() *Player {
+	return NewWithOptions(Options{})
+}
+
+func NewWithOptions(opts Options) *Player {
 	return &Player{
 		socketPath: "/tmp/mpv-socket",
 		EventCh:    make(chan Event, 100),
+		audioOnly:  opts.AudioOnly,
 	}
 }
 
@@ -51,11 +61,16 @@ func (p *Player) Start() error {
 	// Remove old socket if it exists and is stale
 	os.Remove(p.socketPath)
 
-	p.cmd = exec.Command("mpv",
+	args := []string{
 		"--idle=yes",
-		"--input-ipc-server="+p.socketPath,
+		"--input-ipc-server=" + p.socketPath,
 		"--no-terminal",
-	)
+	}
+	if p.audioOnly {
+		args = append(args, "--audio-only")
+	}
+
+	p.cmd = exec.Command("mpv", args...)
 
 	if err := p.cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start mpv: %w", err)
@@ -138,6 +153,13 @@ func (p *Player) SendCommand(args ...interface{}) error {
 }
 
 func (p *Player) Play(url string) error {
+	if p.audioOnly {
+		if err := p.SendCommand("set", "vid", "no"); err != nil {
+			return err
+		}
+	} else if err := p.SendCommand("set", "vid", "auto"); err != nil {
+		return err
+	}
 	return p.SendCommand("loadfile", url, "replace")
 }
 
@@ -208,4 +230,35 @@ func (p *Player) SetLoop(mode string) error {
 	default:
 		return fmt.Errorf("unknown loop mode: %s", mode)
 	}
+}
+
+func (p *Player) SendCommandWithResult(args ...interface{}) (string, error) {
+	conn, err := net.Dial("unix", p.socketPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to connect to mpv socket: %w", err)
+	}
+	defer conn.Close()
+
+	cmd := map[string]interface{}{
+		"command": args,
+	}
+
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return "", err
+	}
+	data = append(data, '\n')
+
+	_, err = conn.Write(data)
+	if err != nil {
+		return "", fmt.Errorf("failed to send command: %w", err)
+	}
+
+	buf := make([]byte, 4096)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	return string(buf[:n]), nil
 }
