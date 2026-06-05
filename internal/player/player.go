@@ -173,6 +173,10 @@ func (p *Player) Play(url string) error {
 }
 
 func (p *Player) PlayList(urls []string, startIndex int) error {
+	if len(urls) == 0 {
+		return nil
+	}
+
 	if p.audioOnly {
 		if err := p.SendCommand("set", "vid", "no"); err != nil {
 			return err
@@ -181,18 +185,25 @@ func (p *Player) PlayList(urls []string, startIndex int) error {
 		return err
 	}
 
-	if err := p.SendCommand("playlist-clear"); err != nil {
+	if err := p.SendCommand("loadfile", urls[0], "replace"); err != nil {
 		return err
 	}
-	for _, url := range urls {
-		if err := p.SendCommand("loadfile", url, "append"); err != nil {
+
+	for i := 1; i < len(urls); i++ {
+		if err := p.SendCommand("loadfile", urls[i], "append"); err != nil {
 			return err
 		}
 	}
+
 	if err := p.SendCommand("set", "pause", "no"); err != nil {
 		return err
 	}
-	return p.SendCommand("set", "playlist-pos", startIndex)
+
+	if startIndex > 0 {
+		return p.SendCommand("set", "playlist-pos", startIndex)
+	}
+
+	return nil
 }
 
 func (p *Player) AppendToPlaylist(url string) error {
