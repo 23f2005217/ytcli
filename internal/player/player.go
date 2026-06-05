@@ -58,6 +58,9 @@ func (p *Player) Start() error {
 		return nil
 	}
 
+	// Kill any stale mpv process started by ytcli
+	exec.Command("pkill", "-f", "mpv.*--input-ipc-server="+p.socketPath).Run()
+
 	// Remove old socket if it exists and is stale
 	os.Remove(p.socketPath)
 
