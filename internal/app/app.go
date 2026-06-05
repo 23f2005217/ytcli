@@ -210,19 +210,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "Playing"
 		}
 
+		if strings.Contains(m.nowPlayingTitle, "clen=") || strings.Contains(m.nowPlayingTitle, "lmt=") || strings.Contains(m.nowPlayingTitle, "&sig=") || strings.Contains(m.nowPlayingTitle, "videoplayback") {
+			m.nowPlayingTitle = "YouTube Audio Stream"
+		}
+
 		if msg.path != "" {
 			if idx := findItemIndexByURL(m.queue, msg.path); idx >= 0 {
 				m.playingList = "queue"
 				m.current = idx
+				m.nowPlayingTitle = m.queue[idx].Title
 			} else if idx := findItemIndexByURL(m.playlist, msg.path); idx >= 0 {
 				m.playingList = "playlist"
 				m.current = idx
+				m.nowPlayingTitle = m.playlist[idx].Title
 			} else if idx := findItemIndexByURL(m.items, msg.path); idx >= 0 {
 				m.playingList = "results"
 				m.current = idx
+				m.nowPlayingTitle = m.items[idx].Title
 			} else if idx := findItemIndexByURL(m.history, msg.path); idx >= 0 {
 				m.playingList = "history"
 				m.current = idx
+				m.nowPlayingTitle = m.history[idx].Title
 			}
 		}
 

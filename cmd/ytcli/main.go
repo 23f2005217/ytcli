@@ -792,6 +792,42 @@ func playPlaylistAndReport(items []youtube.Item, startIndex int, audioOnly bool,
 	return nil
 }
 
+func lookupTitle(url string) string {
+	id := extractID(url)
+	if id == "" {
+		return ""
+	}
+
+	for _, item := range queue.Load() {
+		if item.ID == id || item.URL == url {
+			return item.Title
+		}
+	}
+
+	for _, item := range playlist.Load() {
+		if item.ID == id || item.URL == url {
+			return item.Title
+		}
+	}
+
+	for _, item := range history.Load() {
+		if item.ID == id || item.URL == url {
+			return item.Title
+		}
+	}
+
+	names, _ := listPlaylistNames()
+	for _, name := range names {
+		for _, item := range loadNamedPlaylist(name) {
+			if item.ID == id || item.URL == url {
+				return item.Title
+			}
+		}
+	}
+
+	return ""
+}
+
 func getStatus() (playerStatus, error) {
 	p := player.New()
 	if err := p.Connect(); err != nil {
@@ -814,6 +850,7 @@ func getStatus() (playerStatus, error) {
 	if err != nil {
 		return playerStatus{}, err
 	}
+	pathResult, _ := p.SendCommandWithResult("get_property", "path")
 
 	duration := parseFloatResult(durationResult)
 	position := parseFloatResult(positionResult)
@@ -822,10 +859,22 @@ func getStatus() (playerStatus, error) {
 		progress = (position / duration) * 100
 	}
 
+	title := parseStringResult(titleResult)
+	path := parseStringResult(pathResult)
+	if path != "" && path != "Unknown" {
+		if cleanT := lookupTitle(path); cleanT != "" {
+			title = cleanT
+		}
+	}
+
+	if strings.Contains(title, "clen=") || strings.Contains(title, "lmt=") || strings.Contains(title, "&sig=") || strings.Contains(title, "videoplayback") {
+		title = "YouTube Audio Stream"
+	}
+
 	return playerStatus{
 		OK:       true,
 		Running:  true,
-		Title:    parseStringResult(titleResult),
+		Title:    title,
 		Paused:   parseBoolResult(pauseResult),
 		Duration: duration,
 		Position: position,
