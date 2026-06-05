@@ -166,6 +166,9 @@ func (p *Player) Play(url string) error {
 	} else if err := p.SendCommand("set", "vid", "auto"); err != nil {
 		return err
 	}
+	if err := p.SendCommand("set", "pause", "no"); err != nil {
+		return err
+	}
 	return p.SendCommand("loadfile", url, "replace")
 }
 
@@ -185,6 +188,9 @@ func (p *Player) PlayList(urls []string, startIndex int) error {
 		if err := p.SendCommand("loadfile", url, "append"); err != nil {
 			return err
 		}
+	}
+	if err := p.SendCommand("set", "pause", "no"); err != nil {
+		return err
 	}
 	return p.SendCommand("set", "playlist-pos", startIndex)
 }
