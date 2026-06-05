@@ -228,6 +228,7 @@ func cmdPlay() {
 		os.Exit(1)
 	}
 
+	opts.URL = normalizeURL(opts.URL)
 	playItem := youtube.Item{Title: opts.URL, URL: opts.URL, ID: extractID(opts.URL)}
 	if err := playAndReport(playItem, opts.AudioOnly, "play"); err != nil {
 		exitError(err)
@@ -313,6 +314,7 @@ func cmdPlaylist() {
 			fmt.Fprintln(os.Stderr, "Usage: ytcli playlist add [name] <url> [title]")
 			os.Exit(1)
 		}
+		url = normalizeURL(url)
 		item := youtube.Item{
 			Title: title,
 			URL:   url,
@@ -431,6 +433,7 @@ func cmdQueue() {
 			os.Exit(1)
 		}
 		url := os.Args[3]
+		url = normalizeURL(url)
 		title := url
 		if len(os.Args) > 4 {
 			title = strings.Join(os.Args[4:], " ")
@@ -970,7 +973,27 @@ func parseNamedIndexArgs(args []string) (string, string) {
 }
 
 func looksLikeURL(s string) bool {
-	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")
+	return strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") || isValidVideoID(s)
+}
+
+func isValidVideoID(s string) bool {
+	if len(s) != 11 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func normalizeURL(s string) string {
+	s = strings.TrimSpace(s)
+	if isValidVideoID(s) {
+		return "https://youtu.be/" + s
+	}
+	return s
 }
 
 func isDefaultPlaylist(name string) bool {
