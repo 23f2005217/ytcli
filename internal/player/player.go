@@ -31,7 +31,7 @@ type Options struct {
 }
 
 func New() *Player {
-	return NewWithOptions(Options{})
+	return NewWithOptions(Options{AudioOnly: true})
 }
 
 func NewWithOptions(opts Options) *Player {
@@ -67,7 +67,7 @@ func (p *Player) Start() error {
 		"--no-terminal",
 	}
 	if p.audioOnly {
-		args = append(args, "--audio-only")
+		args = append(args, "--no-video")
 	}
 
 	p.cmd = exec.Command("mpv", args...)
@@ -80,6 +80,9 @@ func (p *Player) Start() error {
 	for i := 0; i < 50; i++ {
 		if _, err := os.Stat(p.socketPath); err == nil {
 			break
+		}
+		if p.cmd.ProcessState != nil && p.cmd.ProcessState.Exited() {
+			return fmt.Errorf("mpv exited before creating IPC socket")
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -163,6 +166,30 @@ func (p *Player) Play(url string) error {
 	return p.SendCommand("loadfile", url, "replace")
 }
 
+func (p *Player) PlayList(urls []string, startIndex int) error {
+	if p.audioOnly {
+		if err := p.SendCommand("set", "vid", "no"); err != nil {
+			return err
+		}
+	} else if err := p.SendCommand("set", "vid", "auto"); err != nil {
+		return err
+	}
+
+	if err := p.SendCommand("playlist-clear"); err != nil {
+		return err
+	}
+	for _, url := range urls {
+		if err := p.SendCommand("loadfile", url, "append"); err != nil {
+			return err
+		}
+	}
+	return p.SendCommand("set", "playlist-pos", startIndex)
+}
+
+func (p *Player) AppendToPlaylist(url string) error {
+	return p.SendCommand("loadfile", url, "append-play")
+}
+
 func (p *Player) TogglePause() error {
 	return p.SendCommand("cycle", "pause")
 }
@@ -181,6 +208,15 @@ func (p *Player) Next() error {
 
 func (p *Player) Previous() error {
 	return p.SendCommand("playlist-prev")
+}
+
+func (p *Player) Disconnect() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.conn != nil {
+		p.conn.Close()
+		p.conn = nil
+	}
 }
 
 func (p *Player) Stop() error {

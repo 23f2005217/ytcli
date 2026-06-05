@@ -1,35 +1,34 @@
 package app
 
 import (
-	"bytes"
-	"context"
+	"encoding/json"
 	"fmt"
-	"os/exec"
 	"strings"
-	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"ytcli/internal/history"
 	"ytcli/internal/player"
 	"ytcli/internal/playlist"
+	"ytcli/internal/queue"
 	"ytcli/internal/youtube"
 )
 
 type Model struct {
-	items       []youtube.Item
-	playlist    []youtube.Item
-	queue       []youtube.Item
-	history     []youtube.Item
-	mode        string // "results" | "playlist" | "queue" | "history"
-	playingList string // "results" | "playlist" | "queue" | "history"
-	cursor      int
-	current     int
-	query       string
-	loading     bool
-	errorMsg    string
-	status      string
-	player      *player.Player
-	loopMode    string
+	items           []youtube.Item
+	playlist        []youtube.Item
+	queue           []youtube.Item
+	history         []youtube.Item
+	mode            string // "results" | "playlist" | "queue" | "history"
+	playingList     string // "results" | "playlist" | "queue" | "history"
+	cursor          int
+	current         int
+	query           string
+	loading         bool
+	errorMsg        string
+	status          string
+	player          *player.Player
+	loopMode        string
+	nowPlayingTitle string
 }
 
 func NewModel(query string, p *player.Player) Model {
@@ -42,7 +41,7 @@ func NewModel(query string, p *player.Player) Model {
 		mode:        "results",
 		playingList: "results",
 		playlist:    playlist.Load(),
-		queue:       []youtube.Item{},
+		queue:       queue.Load(),
 		history:     history.Load(),
 	}
 }
@@ -90,36 +89,87 @@ func searchCmd(query string) tea.Cmd {
 	}
 }
 
-func playCmd(p *player.Player, item youtube.Item) tea.Cmd {
+func playListCmd(p *player.Player, items []youtube.Item, startIndex int) tea.Cmd {
 	return func() tea.Msg {
-		// Extract stream URL using yt-dlp as requested
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		cmd := exec.CommandContext(ctx, "yt-dlp", "-f", "bestaudio", "-g", item.URL)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-
-		if err := cmd.Run(); err != nil {
-			return playResultMsg{err: fmt.Errorf("stream extraction failed: %v\nstderr: %s", err, stderr.String()), item: item}
+		if len(items) == 0 || startIndex < 0 || startIndex >= len(items) {
+			return playResultMsg{err: fmt.Errorf("invalid play index")}
 		}
 
-		streamURL := strings.TrimSpace(stdout.String())
-		if streamURL == "" {
-			return playResultMsg{err: fmt.Errorf("yt-dlp returned empty stream URL"), item: item}
+		urls := make([]string, len(items))
+		for i, item := range items {
+			urls[i] = item.URL
 		}
 
-		// Pass extracted stream URL to player
-		err := p.Play(streamURL)
-		return playResultMsg{err: err, item: item}
+		err := p.PlayList(urls, startIndex)
+		return playResultMsg{err: err, item: items[startIndex]}
 	}
+}
+
+type statusResultMsg struct {
+	title       string
+	path        string
+	playlistPos int
+	paused      bool
+	err         error
+}
+
+func queryPlayerStatusCmd(p *player.Player) tea.Cmd {
+	return func() tea.Msg {
+		titleResult, err := p.SendCommandWithResult("get_property", "media-title")
+		if err != nil {
+			return statusResultMsg{err: err}
+		}
+		pathResult, _ := p.SendCommandWithResult("get_property", "path")
+		posResult, _ := p.SendCommandWithResult("get_property", "playlist-pos")
+		pauseResult, _ := p.SendCommandWithResult("get_property", "pause")
+
+		var title string
+		var resp map[string]interface{}
+		if json.Unmarshal([]byte(titleResult), &resp) == nil {
+			if t, ok := resp["data"].(string); ok {
+				title = t
+			}
+		}
+
+		var path string
+		if json.Unmarshal([]byte(pathResult), &resp) == nil {
+			if pUrl, ok := resp["data"].(string); ok {
+				path = pUrl
+			}
+		}
+
+		playlistPos := -1
+		if json.Unmarshal([]byte(posResult), &resp) == nil {
+			if val, ok := resp["data"].(float64); ok {
+				playlistPos = int(val)
+			}
+		}
+
+		paused := false
+		if json.Unmarshal([]byte(pauseResult), &resp) == nil {
+			if pz, ok := resp["data"].(bool); ok {
+				paused = pz
+			}
+		}
+
+		return statusResultMsg{title: title, path: path, playlistPos: playlistPos, paused: paused}
+	}
+}
+
+func findItemIndexByURL(items []youtube.Item, url string) int {
+	for i, item := range items {
+		if item.URL == url {
+			return i
+		}
+	}
+	return -1
 }
 
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(
 		searchCmd(m.query),
 		waitForPlayerEvent(m.player),
+		queryPlayerStatusCmd(m.player),
 	)
 }
 
@@ -142,13 +192,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "Playing"
 			m.errorMsg = ""
-			m.history = append([]youtube.Item{msg.item}, m.history...)
-			history.Save(m.history)
+			if msg.item.URL != "" {
+				m.history = append([]youtube.Item{msg.item}, m.history...)
+				history.Save(m.history)
+			}
+		}
+		return m, queryPlayerStatusCmd(m.player)
+
+	case statusResultMsg:
+		if msg.err != nil {
+			return m, nil
+		}
+		m.nowPlayingTitle = msg.title
+		if msg.paused {
+			m.status = "Paused"
+		} else {
+			m.status = "Playing"
+		}
+
+		if msg.path != "" {
+			if idx := findItemIndexByURL(m.queue, msg.path); idx >= 0 {
+				m.playingList = "queue"
+				m.current = idx
+			} else if idx := findItemIndexByURL(m.playlist, msg.path); idx >= 0 {
+				m.playingList = "playlist"
+				m.current = idx
+			} else if idx := findItemIndexByURL(m.items, msg.path); idx >= 0 {
+				m.playingList = "results"
+				m.current = idx
+			} else if idx := findItemIndexByURL(m.history, msg.path); idx >= 0 {
+				m.playingList = "history"
+				m.current = idx
+			}
+		}
+
+		if m.mode == m.playingList && m.current >= 0 {
+			m.cursor = m.current
 		}
 		return m, nil
 
 	case playerEventMsg:
-		// Listen for next event
 		cmd := waitForPlayerEvent(m.player)
 
 		switch msg.ev.Event {
@@ -157,40 +240,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.current = -1
 				m.status = ""
 				m.errorMsg = "Playback stopped unexpectedly (stream error or mpv crash)."
-			} else if msg.ev.Reason == "eof" && m.current >= 0 {
-				var list []youtube.Item
-				if m.playingList == "playlist" {
-					list = m.playlist
-				} else if m.playingList == "queue" {
-					list = m.queue
-				} else if m.playingList == "history" {
-					list = m.history
-				} else {
-					list = m.items
-				}
-
-				if m.loopMode == "one" {
-					m.errorMsg = ""
-					m.status = "Extracting stream (yt-dlp)..."
-					return m, tea.Batch(cmd, playCmd(m.player, list[m.current]))
-				} else if m.current < len(list)-1 {
-					m.current++
-					if m.mode == m.playingList {
-						m.cursor = m.current
-					}
-					m.errorMsg = ""
-					m.status = "Extracting stream (yt-dlp)..."
-					return m, tea.Batch(cmd, playCmd(m.player, list[m.current]))
-				} else {
-					m.current = -1
-					m.status = ""
-				}
-			} else if msg.ev.Reason == "stop" {
-				// We don't clear m.current here because "stop" is usually triggered by loading a new file via n/p or enter.
+			} else if msg.ev.Reason == "eof" {
+				// mpv auto-advances. The file-loaded event will handle updating the index and title.
 			}
 		case "file-loaded":
 			m.status = "Playing"
 			m.errorMsg = ""
+			return m, tea.Batch(cmd, queryPlayerStatusCmd(m.player))
 		}
 
 		return m, cmd
@@ -229,18 +285,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q":
 			if len(list) > 0 && m.cursor >= 0 && m.cursor < len(list) {
 				m.queue = append(m.queue, list[m.cursor])
+				queue.Save(m.queue)
+				m.player.AppendToPlaylist(list[m.cursor].URL)
 			}
 		case "Q":
 			m.mode = "queue"
+			m.queue = queue.Load()
 			m.cursor = 0
 		case "h":
 			if m.mode != "history" {
 				m.mode = "history"
+				m.history = history.Load()
 				m.cursor = 0
 			}
 		case "P":
 			if m.mode != "playlist" {
 				m.mode = "playlist"
+				m.playlist = playlist.Load()
 				m.cursor = 0
 			}
 		case "esc":
@@ -267,10 +328,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				playlist.Save(m.playlist)
 
 				if m.playingList == "playlist" {
+					m.player.SendCommand("playlist-remove", idx)
 					if m.current == idx {
-						// Optionally stop playing, or let mpv finish.
 					} else if m.current > idx {
-						m.current-- // shift tracking
+						m.current--
 					}
 				}
 
@@ -280,12 +341,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.mode == "queue" && len(m.queue) > 0 && m.cursor >= 0 && m.cursor < len(m.queue) {
 				idx := m.cursor
 				m.queue = append(m.queue[:idx], m.queue[idx+1:]...)
+				queue.Save(m.queue)
 
 				if m.playingList == "queue" {
+					m.player.SendCommand("playlist-remove", idx)
 					if m.current == idx {
-						// Optionally stop playing, or let mpv finish.
 					} else if m.current > idx {
-						m.current-- // shift tracking
+						m.current--
 					}
 				}
 
@@ -298,6 +360,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				history.Save(m.history)
 
 				if m.playingList == "history" {
+					m.player.SendCommand("playlist-remove", idx)
 					if m.current == idx {
 					} else if m.current > idx {
 						m.current--
@@ -313,48 +376,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.current = m.cursor
 				m.playingList = m.mode
 				m.errorMsg = ""
-				m.status = "Extracting stream (yt-dlp)..."
-				return m, playCmd(m.player, list[m.cursor])
+				m.status = "Playing"
+				return m, playListCmd(m.player, list, m.cursor)
 			}
 		case "n":
-			var activeList []youtube.Item
-			if m.playingList == "playlist" {
-				activeList = m.playlist
-			} else if m.playingList == "queue" {
-				activeList = m.queue
-			} else if m.playingList == "history" {
-				activeList = m.history
-			} else {
-				activeList = m.items
-			}
-			if m.current >= -1 && m.current < len(activeList)-1 {
-				m.current++
-				if m.mode == m.playingList {
-					m.cursor = m.current
-				}
-				m.errorMsg = ""
-				m.status = "Extracting stream (yt-dlp)..."
-				return m, playCmd(m.player, activeList[m.current])
+			m.errorMsg = ""
+			return m, func() tea.Msg {
+				err := m.player.Next()
+				return playResultMsg{err: err}
 			}
 		case "p":
-			var activeList []youtube.Item
-			if m.playingList == "playlist" {
-				activeList = m.playlist
-			} else if m.playingList == "queue" {
-				activeList = m.queue
-			} else if m.playingList == "history" {
-				activeList = m.history
-			} else {
-				activeList = m.items
-			}
-			if m.current > 0 {
-				m.current--
-				if m.mode == m.playingList {
-					m.cursor = m.current
-				}
-				m.errorMsg = ""
-				m.status = "Extracting stream (yt-dlp)..."
-				return m, playCmd(m.player, activeList[m.current])
+			m.errorMsg = ""
+			return m, func() tea.Msg {
+				err := m.player.Previous()
+				return playResultMsg{err: err}
 			}
 		}
 	}
@@ -370,6 +405,8 @@ func (m Model) View() string {
 		b.WriteString("playlist:\n\n")
 	} else if m.mode == "queue" {
 		b.WriteString("queue:\n\n")
+	} else if m.mode == "history" {
+		b.WriteString("history:\n\n")
 	}
 
 	if m.loading && m.mode == "results" {
@@ -387,8 +424,10 @@ func (m Model) View() string {
 		list = m.items
 	} else if m.mode == "playlist" {
 		list = m.playlist
-	} else {
+	} else if m.mode == "queue" {
 		list = m.queue
+	} else {
+		list = m.history
 	}
 
 	if len(list) == 0 {
@@ -396,8 +435,10 @@ func (m Model) View() string {
 			b.WriteString("(no results)\n")
 		} else if m.mode == "playlist" {
 			b.WriteString("(empty playlist)\n")
-		} else {
+		} else if m.mode == "queue" {
 			b.WriteString("(empty queue)\n")
+		} else {
+			b.WriteString("(empty history)\n")
 		}
 	} else {
 		for i, item := range list {
@@ -417,12 +458,26 @@ func (m Model) View() string {
 
 	b.WriteString("\n")
 
-	if m.current >= 0 {
+	if m.nowPlayingTitle != "" {
+		playingTitle := m.nowPlayingTitle
+		if len(playingTitle) > 60 {
+			playingTitle = playingTitle[:57] + "..."
+		}
+
+		statusPrefix := m.status
+		if statusPrefix == "" {
+			statusPrefix = "Playing"
+		}
+
+		b.WriteString(fmt.Sprintf("▶ %s: %s\n", statusPrefix, playingTitle))
+	} else if m.current >= 0 {
 		var activeList []youtube.Item
 		if m.playingList == "playlist" {
 			activeList = m.playlist
 		} else if m.playingList == "queue" {
 			activeList = m.queue
+		} else if m.playingList == "history" {
+			activeList = m.history
 		} else {
 			activeList = m.items
 		}

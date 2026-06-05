@@ -29,6 +29,7 @@ save_to_history() {
 }
 
 # function to save to history and play via mpv
+# take an argument audio_only if true paass --audio-only to mpv and use different ytdl format for audio only
 play() {
   local url="$1"
   local choice="$2"
@@ -325,22 +326,22 @@ if [[ $action = "c" ]]; then
   videolink="https://youtu.be/"
 
   # prompt the results to user infinitely until they exit (escape)
-while true; do
-  # Prompt user to select a video from channel
-  choice_text=$(echo -e "$ids" | cut -d$'	' -f2 | $promptcmd)
-  if [ -z "$choice_text" ]; then exit 0; fi
+  while true; do
+    # Prompt user to select a video from channel
+    choice_text=$(echo -e "$ids" | cut -d$'	' -f2 | $promptcmd)
+    if [ -z "$choice_text" ]; then exit 0; fi
 
-  # Get full entry, ID, and line number of selected item
-  selected_entry=$(echo -e "$ids" | grep -Fwm1 "$choice_text")
-  if [ -z "$selected_entry" ]; then continue; fi
-  current_id=$(echo "$selected_entry" | cut -d$'	' -f1)
-  current_text=$(echo "$selected_entry" | cut -d$'	' -f2)
-  current_line=$(echo -e "$ids" | grep -Fwnm1 "$choice_text" | cut -d: -f1)
+    # Get full entry, ID, and line number of selected item
+    selected_entry=$(echo -e "$ids" | grep -Fwm1 "$choice_text")
+    if [ -z "$selected_entry" ]; then continue; fi
+    current_id=$(echo "$selected_entry" | cut -d$'	' -f1)
+    current_text=$(echo "$selected_entry" | cut -d$'	' -f2)
+    current_line=$(echo -e "$ids" | grep -Fwnm1 "$choice_text" | cut -d: -f1)
 
-  echo -e "$current_text\t($current_id)"
+    echo -e "$current_text\t($current_id)"
 
-  # Play the selected video (channel only has videos)
-  case $current_id in
+    # Play the selected video (channel only has videos)
+    case $current_id in
     ???????????)
       url="$videolink$current_id"
       play "$url" "$current_text"
@@ -348,12 +349,12 @@ while true; do
     *)
       exit 0
       ;;
-  esac
+    esac
 
-  # Post-playback options loop
-  while true; do
-    post_choice=$(echo -e "Repeat\nNext\nBack to list\nExit" | $promptcmd)
-    case "$post_choice" in
+    # Post-playback options loop
+    while true; do
+      post_choice=$(echo -e "Repeat\nNext\nBack to list\nExit" | $promptcmd)
+      case "$post_choice" in
       "Repeat")
         # Replay the same video
         url="$videolink$current_id"
@@ -365,7 +366,7 @@ while true; do
         next_entry=$(echo -e "$ids" | sed -n "${next_line}p")
         if [ -z "$next_entry" ]; then
           echo "No more videos in channel."
-          break  # Exit post-play loop, return to main selection
+          break # Exit post-play loop, return to main selection
         fi
         # Update current item variables
         current_id=$(echo "$next_entry" | cut -d$'	' -f1)
@@ -376,14 +377,14 @@ while true; do
         play "$url" "$current_text"
         ;;
       "Back to list")
-        break  # Exit post-play loop, return to main selection
+        break # Exit post-play loop, return to main selection
         ;;
-      "Exit"|*)
+      "Exit" | *)
         exit 0
         ;;
-    esac
+      esac
+    done
   done
-done
 else
   # if in search show query result vids
   response="$(curl -s "https://www.youtube.com/results?search_query=$query" |
@@ -412,22 +413,22 @@ else
   videolink="https://youtu.be/"
   playlink="https://youtube.com/playlist?list="
   # prompt the results to user infinitely until they exit (escape)
-while true; do
-  # Prompt user to select a video/playlist from results
-  choice_text=$(echo -e "$ids" | cut -d$'	' -f2 | $promptcmd)
-  if [ -z "$choice_text" ]; then exit 0; fi
+  while true; do
+    # Prompt user to select a video/playlist from results
+    choice_text=$(echo -e "$ids" | cut -d$'	' -f2 | $promptcmd)
+    if [ -z "$choice_text" ]; then exit 0; fi
 
-  # Get full entry, ID, and line number of selected item
-  selected_entry=$(echo -e "$ids" | grep -Fwm1 "$choice_text")
-  if [ -z "$selected_entry" ]; then continue; fi
-  current_id=$(echo "$selected_entry" | cut -d$'	' -f1)
-  current_text=$(echo "$selected_entry" | cut -d$'	' -f2)
-  current_line=$(echo -e "$ids" | grep -Fwnm1 "$choice_text" | cut -d: -f1)
+    # Get full entry, ID, and line number of selected item
+    selected_entry=$(echo -e "$ids" | grep -Fwm1 "$choice_text")
+    if [ -z "$selected_entry" ]; then continue; fi
+    current_id=$(echo "$selected_entry" | cut -d$'	' -f1)
+    current_text=$(echo "$selected_entry" | cut -d$'	' -f2)
+    current_line=$(echo -e "$ids" | grep -Fwnm1 "$choice_text" | cut -d: -f1)
 
-  echo -e "$current_text\t($current_id)"
+    echo -e "$current_text\t($current_id)"
 
-  # Determine URL and play the selected item
-  case $current_id in
+    # Determine URL and play the selected item
+    case $current_id in
     ???????????)
       url="$videolink$current_id"
       play "$url" "$current_text"
@@ -439,23 +440,23 @@ while true; do
     *)
       exit 0
       ;;
-  esac
+    esac
 
-  # Post-playback options loop
-  while true; do
-    post_choice=$(echo -e "Repeat\nNext\nBack to list\nExit" | $promptcmd)
-    case "$post_choice" in
+    # Post-playback options loop
+    while true; do
+      post_choice=$(echo -e "Repeat\nNext\nBack to list\nExit" | $promptcmd)
+      case "$post_choice" in
       "Repeat")
         # Replay the same item
         case $current_id in
-          ???????????)
-            url="$videolink$current_id"
-            play "$url" "$current_text"
-            ;;
-          ??????????????????????????????????)
-            url="$playlink$current_id"
-            play "$url" "$current_text"
-            ;;
+        ???????????)
+          url="$videolink$current_id"
+          play "$url" "$current_text"
+          ;;
+        ??????????????????????????????????)
+          url="$playlink$current_id"
+          play "$url" "$current_text"
+          ;;
         esac
         ;;
       "Next")
@@ -464,7 +465,7 @@ while true; do
         next_entry=$(echo -e "$ids" | sed -n "${next_line}p")
         if [ -z "$next_entry" ]; then
           echo "No more results available."
-          break  # Exit post-play loop, return to main selection
+          break # Exit post-play loop, return to main selection
         fi
         # Update current item variables
         current_id=$(echo "$next_entry" | cut -d$'	' -f1)
@@ -472,28 +473,27 @@ while true; do
         current_line=$next_line
         # Determine URL for next item
         case $current_id in
-          ???????????)
-            url="$videolink$current_id"
-            ;;
-          ??????????????????????????????????)
-            url="$playlink$current_id"
-            ;;
-          *)
-            echo "Invalid next item, returning to list."
-            break
-            ;;
+        ???????????)
+          url="$videolink$current_id"
+          ;;
+        ??????????????????????????????????)
+          url="$playlink$current_id"
+          ;;
+        *)
+          echo "Invalid next item, returning to list."
+          break
+          ;;
         esac
         echo -e "$current_text\t($current_id)"
         play "$url" "$current_text"
         ;;
       "Back to list")
-        break  # Exit post-play loop, return to main selection
+        break # Exit post-play loop, return to main selection
         ;;
-      "Exit"|*)
+      "Exit" | *)
         exit 0
         ;;
-    esac
+      esac
+    done
   done
-done
 fi
-

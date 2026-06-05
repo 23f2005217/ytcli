@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,12 +11,29 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/term"
 	"ytcli/internal/app"
 	"ytcli/internal/history"
 	"ytcli/internal/player"
 	"ytcli/internal/playlist"
+	"ytcli/internal/queue"
 	"ytcli/internal/youtube"
 )
+
+type playOptions struct {
+	URL       string
+	AudioOnly bool
+	JSON      bool
+}
+
+type searchOptions struct {
+	Query       string
+	Limit       int
+	MinDuration int
+	MaxDuration int
+	AudioOnly   bool
+	JSON        bool
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -32,6 +50,8 @@ func main() {
 		cmdSearch()
 	case "play":
 		cmdPlay()
+	case "play-search":
+		cmdPlaySearch()
 	case "playlist":
 		cmdPlaylist()
 	case "history":
@@ -44,11 +64,26 @@ func main() {
 		cmdControl("playlist-prev")
 	case "pause":
 		cmdControl("cycle", "pause")
+	case "resume":
+		cmdResume()
 	case "stop":
 		cmdControl("stop")
 	case "current":
 		cmdCurrent()
+	case "status":
+		cmdStatus()
+	case "agent-help":
+		printAgentHelp()
 	default:
+		// In headless mode (non-TTY), unknown commands return JSON error instead of crashing
+		if !term.IsTerminal(uintptr(os.Stdin.Fd())) {
+			outputJSON(map[string]interface{}{
+				"ok":      false,
+				"error":   "unknown_command",
+				"message": fmt.Sprintf("unknown command: %s", cmd),
+			})
+			os.Exit(1)
+		}
 		// Treat everything as a TUI search query
 		query := strings.Join(os.Args[1:], " ")
 		runTUI(query)
@@ -61,6 +96,7 @@ func printHelp() {
 Usage:
   ytcli <search query>                  Open TUI search results
   ytcli search <query>                  Search and print JSON results
+  ytcli play-search [opts] <query>      Search, choose first match, and play it
   ytcli play [--audio-only] <url>       Play a URL with mpv
 
 Agent-friendly commands:
@@ -71,17 +107,20 @@ Agent-friendly commands:
   ytcli playlist list [name]
   ytcli playlist remove [name] <index>
   ytcli playlist clear [name]
+  ytcli playlist play [name] [index] [--audio-only]
 
   ytcli queue add <url> [title]
   ytcli queue list
   ytcli queue remove <index>
   ytcli queue pop
+  ytcli queue play [--audio-only]
   ytcli queue clear
 
   ytcli history list
   ytcli history clear
 
 Playback control:
+  ytcli status
   ytcli current
   ytcli next
   ytcli prev
@@ -91,13 +130,42 @@ Playback control:
 Most data commands print JSON to stdout.`)
 }
 
+func printAgentHelp() {
+	fmt.Println(`ytcli agent commands
+
+Search:
+  ytcli search --limit 5 --max-duration 600 <query>
+  ytcli play-search --audio-only --max-duration 600 <query>
+
+Play:
+  ytcli play --audio-only <url>
+  ytcli status
+  ytcli pause
+  ytcli stop
+
+Queue:
+  ytcli queue add <url> [title]
+  ytcli queue play --audio-only
+  ytcli queue pop
+  ytcli queue list
+
+Playlist:
+  ytcli playlist names
+  ytcli playlist create <name>
+  ytcli playlist add <name> <url> [title]
+  ytcli playlist play <name> [index] --audio-only
+  ytcli playlist list <name>
+
+Data commands return JSON. Prefer play-search for a one-command search-and-play workflow.`)
+}
+
 func runTUI(query string) {
 	p := player.New()
 	if err := p.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error starting mpv player: %v\n", err)
 		os.Exit(1)
 	}
-	defer p.Quit()
+	defer p.Disconnect()
 
 	model := app.NewModel(query, p)
 	prog := tea.NewProgram(model)
@@ -111,15 +179,17 @@ func runTUI(query string) {
 
 func cmdSearch() {
 	if len(os.Args) < 3 {
-		fmt.Fprintln(os.Stderr, "Usage: yt search \"query\" [--json]")
+		fmt.Fprintln(os.Stderr, "Usage: ytcli search [--limit n] [--min-duration sec] [--max-duration sec] <query>")
 		os.Exit(1)
 	}
 
-	query := os.Args[2]
-	results, err := youtube.Search(query)
+	opts, err := parseSearchArgs(os.Args[2:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		exitError(err)
+	}
+	results, err := searchFiltered(opts)
+	if err != nil {
+		exitError(err)
 	}
 
 	outputJSON(results)
@@ -129,48 +199,65 @@ func cmdSearch() {
 
 func cmdPlay() {
 	if len(os.Args) < 3 {
+		// No URL provided: try to connect to existing mpv and toggle pause
+		p := player.New()
+		if err := p.Connect(); err != nil {
+			fmt.Fprintln(os.Stderr, "Usage: ytcli play <url> [--audio-only|--audio|--video]")
+			os.Exit(1)
+		}
+		if err := p.SendCommand("cycle", "pause"); err != nil {
+			exitError(err)
+		}
+		title, _ := p.SendCommandWithResult("get_property", "media-title")
+		paused, _ := p.SendCommandWithResult("get_property", "pause")
+		outputJSON(map[string]interface{}{
+			"ok":     true,
+			"action": "toggle-pause",
+			"title":  parseStringResult(title),
+			"paused": parseBoolResult(paused),
+		})
+		return
+	}
+
+	opts, err := parsePlayArgs(os.Args[2:])
+	if err != nil {
+		exitError(err)
+	}
+	if opts.URL == "" {
 		fmt.Fprintln(os.Stderr, "Usage: ytcli play <url> [--audio-only|--audio|--video]")
 		os.Exit(1)
 	}
 
-	url, audioOnly := parsePlayArgs(os.Args[2:])
-	if url == "" {
-		fmt.Fprintln(os.Stderr, "Usage: ytcli play <url> [--audio-only|--audio|--video]")
-		os.Exit(1)
+	playItem := youtube.Item{Title: opts.URL, URL: opts.URL, ID: extractID(opts.URL)}
+	if err := playAndReport(playItem, opts.AudioOnly, "play"); err != nil {
+		exitError(err)
 	}
-
-	p := player.NewWithOptions(player.Options{AudioOnly: audioOnly})
-	if err := p.Start(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error starting mpv: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := p.Play(url); err != nil {
-		fmt.Fprintf(os.Stderr, "Error playing: %v\n", err)
-		os.Exit(1)
-	}
-
-	fmt.Fprintf(os.Stderr, "Playing: %s\n", url)
 }
 
-func parsePlayArgs(args []string) (string, bool) {
-	audioOnly := false
-	url := ""
-
-	for _, arg := range args {
-		switch arg {
-		case "--audio-only", "--audio":
-			audioOnly = true
-		case "--video":
-			audioOnly = false
-		default:
-			if url == "" {
-				url = arg
-			}
-		}
+func cmdPlaySearch() {
+	if len(os.Args) < 3 {
+		fmt.Fprintln(os.Stderr, "Usage: ytcli play-search [--audio-only] [--limit n] [--min-duration sec] [--max-duration sec] <query>")
+		os.Exit(1)
 	}
 
-	return url, audioOnly
+	opts, err := parseSearchArgs(os.Args[2:])
+	if err != nil {
+		exitError(err)
+	}
+	if opts.Query == "" {
+		exitError(errors.New("query is required"))
+	}
+	results, err := searchFiltered(opts)
+	if err != nil {
+		exitError(err)
+	}
+	if len(results) == 0 {
+		outputJSON(map[string]interface{}{"ok": false, "error": "no_results", "query": opts.Query})
+		os.Exit(1)
+	}
+	if err := playAndReport(results[0], opts.AudioOnly, "play-search"); err != nil {
+		exitError(err)
+	}
 }
 
 // --- playlist ---
@@ -278,8 +365,26 @@ func cmdPlaylist() {
 		}
 		outputJSON(map[string]interface{}{"ok": true, "playlist": playlistDisplayName(name), "items": []youtube.Item{}})
 
+	case "play":
+		name, idx, audioOnly, err := parsePlaylistPlayArgs(os.Args[3:])
+		if err != nil {
+			exitError(err)
+		}
+		items := loadNamedPlaylist(name)
+		if len(items) == 0 {
+			outputJSON(map[string]interface{}{"ok": false, "error": "empty_playlist", "playlist": playlistDisplayName(name)})
+			os.Exit(1)
+		}
+		if idx < 0 || idx >= len(items) {
+			fmt.Fprintf(os.Stderr, "Error: index %d out of range (0-%d)\n", idx, len(items)-1)
+			os.Exit(1)
+		}
+		if err := playPlaylistAndReport(items, idx, audioOnly, "playlist-play"); err != nil {
+			exitError(err)
+		}
+
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: ytcli playlist [names|create|delete|add|list|remove|clear]")
+		fmt.Fprintln(os.Stderr, "Usage: ytcli playlist [names|create|delete|add|list|remove|clear|play]")
 		os.Exit(1)
 	}
 }
@@ -300,10 +405,9 @@ func cmdHistory() {
 
 	case "clear":
 		if err := history.Save([]youtube.Item{}); err != nil {
-			fmt.Fprintf(os.Stderr, "Error clearing history: %v\n", err)
-			os.Exit(1)
+			exitError(fmt.Errorf("clearing history: %w", err))
 		}
-		fmt.Fprintln(os.Stderr, "History cleared.")
+		outputJSON(map[string]interface{}{"ok": true, "history": []youtube.Item{}})
 
 	default:
 		fmt.Fprintln(os.Stderr, "Usage: yt history [list|clear]")
@@ -314,9 +418,6 @@ func cmdHistory() {
 // --- queue ---
 
 func cmdQueue() {
-	// Queue is in-memory for TUI, but we can expose basic file-based queue for CLI
-	queuePath := getQueuePath()
-
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, "Usage: yt queue [add <url>|list --json|clear]")
 		os.Exit(1)
@@ -334,18 +435,25 @@ func cmdQueue() {
 		if len(os.Args) > 4 {
 			title = strings.Join(os.Args[4:], " ")
 		}
-		items := loadJSON(queuePath)
+		items := queue.Load()
 		item := youtube.Item{
 			Title: title,
 			URL:   url,
 			ID:    extractID(url),
 		}
 		items = append(items, item)
-		saveJSON(queuePath, items)
+		queue.Save(items)
+
+		// Append to background mpv if running
+		p := player.New()
+		if err := p.Connect(); err == nil {
+			p.AppendToPlaylist(url)
+		}
+
 		outputJSON(map[string]interface{}{"ok": true, "index": len(items) - 1, "item": item})
 
 	case "list":
-		items := loadJSON(queuePath)
+		items := queue.Load()
 		outputJSON(map[string]interface{}{"queue": items})
 
 	case "remove":
@@ -358,33 +466,67 @@ func cmdQueue() {
 			fmt.Fprintln(os.Stderr, "Error: index must be a number")
 			os.Exit(1)
 		}
-		items := loadJSON(queuePath)
+		items := queue.Load()
 		if idx < 0 || idx >= len(items) {
 			fmt.Fprintf(os.Stderr, "Error: index %d out of range (0-%d)\n", idx, len(items)-1)
 			os.Exit(1)
 		}
 		removed := items[idx]
 		items = append(items[:idx], items[idx+1:]...)
-		saveJSON(queuePath, items)
+		queue.Save(items)
+
+		// Remove from background mpv if running
+		p := player.New()
+		if err := p.Connect(); err == nil {
+			p.SendCommand("playlist-remove", idx)
+		}
+
 		outputJSON(map[string]interface{}{"ok": true, "removed": removed, "queue": items})
 
 	case "pop":
-		items := loadJSON(queuePath)
+		items := queue.Load()
 		if len(items) == 0 {
 			outputJSON(map[string]interface{}{"ok": true, "item": nil, "queue": items})
 			return
 		}
 		item := items[0]
 		items = items[1:]
-		saveJSON(queuePath, items)
+		queue.Save(items)
+
+		// Pop from background mpv if running
+		p := player.New()
+		if err := p.Connect(); err == nil {
+			p.SendCommand("playlist-remove", 0)
+		}
+
 		outputJSON(map[string]interface{}{"ok": true, "item": item, "queue": items})
 
+	case "play":
+		_, audioOnly := parseAudioFlags(os.Args[3:])
+		items := queue.Load()
+		if len(items) == 0 {
+			outputJSON(map[string]interface{}{"ok": false, "error": "empty_queue", "queue": items})
+			os.Exit(1)
+		}
+		if err := playPlaylistAndReport(items, 0, audioOnly, "queue-play"); err != nil {
+			exitError(err)
+		}
+		// Clear the queue file after loading all items
+		queue.Save([]youtube.Item{})
+
 	case "clear":
-		saveJSON(queuePath, []youtube.Item{})
+		queue.Save([]youtube.Item{})
+
+		// Clear background mpv if running
+		p := player.New()
+		if err := p.Connect(); err == nil {
+			p.SendCommand("playlist-clear")
+		}
+
 		outputJSON(map[string]interface{}{"ok": true, "queue": []youtube.Item{}})
 
 	default:
-		fmt.Fprintln(os.Stderr, "Usage: ytcli queue [add <url>|list|remove <index>|pop|clear]")
+		fmt.Fprintln(os.Stderr, "Usage: ytcli queue [add <url>|list|remove <index>|pop|play|clear]")
 		os.Exit(1)
 	}
 }
@@ -394,73 +536,73 @@ func cmdQueue() {
 func cmdControl(args ...interface{}) {
 	p := player.New()
 	if err := p.Connect(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error: no running mpv instance found. Start the TUI first or use 'yt play <url>'.")
-		os.Exit(1)
+		exitError(errors.New("no running mpv instance found; start playback with 'ytcli play <url>' first"))
 	}
 	if err := p.SendCommand(args...); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		exitError(err)
+	}
+	// Query current track info for feedback
+	title, _ := p.SendCommandWithResult("get_property", "media-title")
+	paused, _ := p.SendCommandWithResult("get_property", "pause")
+	outputJSON(map[string]interface{}{
+		"ok":      true,
+		"command": args,
+		"title":   parseStringResult(title),
+		"paused":  parseBoolResult(paused),
+	})
+}
+
+func cmdResume() {
+	p := player.New()
+	if err := p.Connect(); err != nil {
+		outputJSON(map[string]interface{}{
+			"ok":      false,
+			"error":   "mpv_not_running",
+			"message": "no running mpv instance found; start playback with 'ytcli play <url>' first",
+		})
 		os.Exit(1)
 	}
+	if err := p.SendCommand("set", "pause", "no"); err != nil {
+		exitError(err)
+	}
+	title, _ := p.SendCommandWithResult("get_property", "media-title")
+	paused, _ := p.SendCommandWithResult("get_property", "pause")
+	outputJSON(map[string]interface{}{
+		"ok":     true,
+		"action": "resume",
+		"title":  parseStringResult(title),
+		"paused": parseBoolResult(paused),
+	})
 }
 
 // --- current ---
 func cmdCurrent() {
-	p := player.New()
-	if err := p.Connect(); err != nil {
-		fmt.Fprintln(os.Stderr, "Error: no running mpv instance found. Start the TUI first or use 'ytcli play <url>'.")
-		os.Exit(1)
-	}
-
-	// Get media title
-	titleCmd := []interface{}{"get_property", "media-title"}
-	titleResult, err := p.SendCommandWithResult(titleCmd...)
+	current, err := getStatus()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting media title: %v\n", err)
-		os.Exit(1)
+		exitError(err)
 	}
 
-	// Get pause state
-	pauseCmd := []interface{}{"get_property", "pause"}
-	pauseResult, err := p.SendCommandWithResult(pauseCmd...)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting pause state: %v\n", err)
-		os.Exit(1)
+	state := "Playing"
+	if current.Paused {
+		state = "Paused"
 	}
 
-	// Get duration
-	durationCmd := []interface{}{"get_property", "duration"}
-	durationResult, err := p.SendCommandWithResult(durationCmd...)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting duration: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Get position
-	positionCmd := []interface{}{"get_property", "time-pos"}
-	positionResult, err := p.SendCommandWithResult(positionCmd...)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error getting position: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Parse results
-	title := parseStringResult(titleResult)
-	paused := parseBoolResult(pauseResult)
-	duration := parseFloatResult(durationResult)
-	position := parseFloatResult(positionResult)
-
-	status := "Playing"
-	if paused {
-		status = "Paused"
-	}
-
-	fmt.Printf("Title: %s\n", title)
-	fmt.Printf("Status: %s\n", status)
-	if position >= 0 && duration > 0 {
-		fmt.Printf("Position: %s / %s\n", formatTime(position), formatTime(duration))
-		progress := (position / duration) * 100
+	fmt.Printf("Title: %s\n", current.Title)
+	fmt.Printf("Status: %s\n", state)
+	if current.Position >= 0 && current.Duration > 0 {
+		fmt.Printf("Position: %s / %s\n", formatTime(current.Position), formatTime(current.Duration))
+		progress := (current.Position / current.Duration) * 100
 		fmt.Printf("Progress: %.1f%%\n", progress)
 	}
+}
+
+func cmdStatus() {
+	status, err := getStatus()
+	if err != nil {
+		outputJSON(map[string]interface{}{"ok": false, "running": false, "error": "mpv_not_running", "message": err.Error()})
+		os.Exit(1)
+	}
+	outputJSON(status)
 }
 
 func parseStringResult(result string) string {
@@ -498,6 +640,246 @@ func formatTime(seconds float64) string {
 
 // --- helpers ---
 
+type playerStatus struct {
+	OK       bool    `json:"ok"`
+	Running  bool    `json:"running"`
+	Title    string  `json:"title"`
+	Paused   bool    `json:"paused"`
+	Position float64 `json:"position"`
+	Duration float64 `json:"duration"`
+	Progress float64 `json:"progress"`
+}
+
+func parsePlayArgs(args []string) (playOptions, error) {
+	remaining, audioOnly := parseAudioFlags(args)
+	opts := playOptions{AudioOnly: audioOnly}
+	for _, arg := range remaining {
+		switch arg {
+		case "--json":
+			opts.JSON = true
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return opts, fmt.Errorf("unknown play flag: %s", arg)
+			}
+			if opts.URL == "" {
+				opts.URL = arg
+			}
+		}
+	}
+	return opts, nil
+}
+
+func parseSearchArgs(args []string) (searchOptions, error) {
+	opts := searchOptions{Limit: 20, AudioOnly: true}
+	queryParts := []string{}
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch arg {
+		case "--json":
+			opts.JSON = true
+		case "--audio-only", "--audio":
+			opts.AudioOnly = true
+		case "--video":
+			opts.AudioOnly = false
+		case "--limit":
+			i++
+			if i >= len(args) {
+				return opts, errors.New("--limit requires a value")
+			}
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 1 {
+				return opts, errors.New("--limit must be a positive number")
+			}
+			opts.Limit = n
+		case "--min-duration":
+			i++
+			if i >= len(args) {
+				return opts, errors.New("--min-duration requires seconds")
+			}
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 0 {
+				return opts, errors.New("--min-duration must be a non-negative number")
+			}
+			opts.MinDuration = n
+		case "--max-duration":
+			i++
+			if i >= len(args) {
+				return opts, errors.New("--max-duration requires seconds")
+			}
+			n, err := strconv.Atoi(args[i])
+			if err != nil || n < 0 {
+				return opts, errors.New("--max-duration must be a non-negative number")
+			}
+			opts.MaxDuration = n
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return opts, fmt.Errorf("unknown search flag: %s", arg)
+			}
+			queryParts = append(queryParts, arg)
+		}
+	}
+
+	opts.Query = strings.Join(queryParts, " ")
+	if opts.Query == "" {
+		return opts, errors.New("query is required")
+	}
+	return opts, nil
+}
+
+func searchFiltered(opts searchOptions) ([]youtube.Item, error) {
+	results, err := youtube.Search(opts.Query)
+	if err != nil {
+		return nil, err
+	}
+
+	filtered := make([]youtube.Item, 0, len(results))
+	for _, item := range results {
+		if opts.MinDuration > 0 && item.Duration < opts.MinDuration {
+			continue
+		}
+		if opts.MaxDuration > 0 && item.Duration > opts.MaxDuration {
+			continue
+		}
+		filtered = append(filtered, item)
+		if opts.Limit > 0 && len(filtered) >= opts.Limit {
+			break
+		}
+	}
+	return filtered, nil
+}
+
+func playAndReport(item youtube.Item, audioOnly bool, action string) error {
+	p := player.NewWithOptions(player.Options{AudioOnly: audioOnly})
+	if err := p.Start(); err != nil {
+		return fmt.Errorf("starting mpv: %w", err)
+	}
+	if err := p.Play(item.URL); err != nil {
+		return fmt.Errorf("playing media: %w", err)
+	}
+
+	outputJSON(map[string]interface{}{
+		"ok":         true,
+		"action":     action,
+		"audio_only": audioOnly,
+		"item":       item,
+	})
+	return nil
+}
+
+func playPlaylistAndReport(items []youtube.Item, startIndex int, audioOnly bool, action string) error {
+	p := player.NewWithOptions(player.Options{AudioOnly: audioOnly})
+	if err := p.Start(); err != nil {
+		return fmt.Errorf("starting mpv: %w", err)
+	}
+
+	urls := make([]string, len(items))
+	for i, item := range items {
+		urls[i] = item.URL
+	}
+
+	if err := p.PlayList(urls, startIndex); err != nil {
+		return fmt.Errorf("playing playlist: %w", err)
+	}
+
+	outputJSON(map[string]interface{}{
+		"ok":         true,
+		"action":     action,
+		"audio_only": audioOnly,
+		"items":      items,
+		"index":      startIndex,
+	})
+	return nil
+}
+
+func getStatus() (playerStatus, error) {
+	p := player.New()
+	if err := p.Connect(); err != nil {
+		return playerStatus{}, err
+	}
+
+	titleResult, err := p.SendCommandWithResult("get_property", "media-title")
+	if err != nil {
+		return playerStatus{}, err
+	}
+	pauseResult, err := p.SendCommandWithResult("get_property", "pause")
+	if err != nil {
+		return playerStatus{}, err
+	}
+	durationResult, err := p.SendCommandWithResult("get_property", "duration")
+	if err != nil {
+		return playerStatus{}, err
+	}
+	positionResult, err := p.SendCommandWithResult("get_property", "time-pos")
+	if err != nil {
+		return playerStatus{}, err
+	}
+
+	duration := parseFloatResult(durationResult)
+	position := parseFloatResult(positionResult)
+	progress := 0.0
+	if duration > 0 && position >= 0 {
+		progress = (position / duration) * 100
+	}
+
+	return playerStatus{
+		OK:       true,
+		Running:  true,
+		Title:    parseStringResult(titleResult),
+		Paused:   parseBoolResult(pauseResult),
+		Duration: duration,
+		Position: position,
+		Progress: progress,
+	}, nil
+}
+
+func parseAudioFlags(args []string) ([]string, bool) {
+	filtered := make([]string, 0, len(args))
+	audioOnly := true
+	for _, arg := range args {
+		switch arg {
+		case "--audio-only", "--audio":
+			audioOnly = true
+		case "--video":
+			audioOnly = false
+		default:
+			filtered = append(filtered, arg)
+		}
+	}
+	return filtered, audioOnly
+}
+
+func parsePlaylistPlayArgs(args []string) (string, int, bool, error) {
+	remaining, audioOnly := parseAudioFlags(args)
+	name := ""
+	idx := 0
+	positional := []string{}
+	for _, arg := range remaining {
+		if arg == "--json" {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			return "", 0, audioOnly, fmt.Errorf("unknown playlist play flag: %s", arg)
+		}
+		positional = append(positional, arg)
+	}
+	if len(positional) > 0 {
+		if n, err := strconv.Atoi(positional[0]); err == nil {
+			idx = n
+		} else {
+			name = positional[0]
+		}
+	}
+	if len(positional) > 1 {
+		n, err := strconv.Atoi(positional[1])
+		if err != nil {
+			return "", 0, audioOnly, errors.New("playlist play index must be a number")
+		}
+		idx = n
+	}
+	return name, idx, audioOnly, nil
+}
+
 func outputJSON(v interface{}) {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
@@ -506,7 +888,7 @@ func outputJSON(v interface{}) {
 }
 
 func exitError(err error) {
-	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	outputJSON(map[string]interface{}{"ok": false, "error": "command_failed", "message": err.Error()})
 	os.Exit(1)
 }
 
