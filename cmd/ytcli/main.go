@@ -647,6 +647,7 @@ type playerStatus struct {
 	OK       bool    `json:"ok"`
 	Running  bool    `json:"running"`
 	Title    string  `json:"title"`
+	URL      string  `json:"url"`
 	Paused   bool    `json:"paused"`
 	Position float64 `json:"position"`
 	Duration float64 `json:"duration"`
@@ -878,6 +879,7 @@ func getStatus() (playerStatus, error) {
 		OK:       true,
 		Running:  true,
 		Title:    title,
+		URL:      path,
 		Paused:   parseBoolResult(pauseResult),
 		Duration: duration,
 		Position: position,
