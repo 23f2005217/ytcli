@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -34,9 +35,25 @@ func New() *Player {
 	return NewWithOptions(Options{AudioOnly: true})
 }
 
+func getSocketPath() string {
+	if path := os.Getenv("YTCLI_MPV_SOCKET"); path != "" {
+		return path
+	}
+	if path := os.Getenv("MPV_SOCKET"); path != "" {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err == nil {
+		dir := filepath.Join(home, ".config", "ytcli")
+		_ = os.MkdirAll(dir, 0755)
+		return filepath.Join(dir, "mpv-socket")
+	}
+	return "/tmp/mpv-socket"
+}
+
 func NewWithOptions(opts Options) *Player {
 	return &Player{
-		socketPath: "/tmp/mpv-socket",
+		socketPath: getSocketPath(),
 		EventCh:    make(chan Event, 100),
 		audioOnly:  opts.AudioOnly,
 	}
@@ -200,7 +217,7 @@ func (p *Player) PlayList(urls []string, startIndex int) error {
 	}
 
 	if startIndex > 0 {
-		return p.SendCommand("set", "playlist-pos", startIndex)
+		return p.SendCommand("set_property", "playlist-pos", startIndex)
 	}
 
 	return nil
